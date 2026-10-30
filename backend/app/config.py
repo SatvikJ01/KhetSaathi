@@ -24,6 +24,13 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
 
+    # Warm the cache for the demo field at startup so the first judge visit is instant
+    # (Kotamgaon, ~3 km from Lasalgaon APMC, Niphad, Nashik).
+    prewarm: bool = True
+    demo_lat: float = 20.145
+    demo_lon: float = 74.205
+    demo_crop: str = "onion"
+
 
 @lru_cache
 def get_settings() -> Settings:

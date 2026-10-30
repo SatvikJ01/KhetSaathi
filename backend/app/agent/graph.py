@@ -28,6 +28,7 @@ from app.agent.prompts import DRAFT_SYSTEM, FEEDBACK_BLOCK, OFF_TOPIC_REPLY, UND
 from app.agent.verify import verify_draft
 from app.tools import (
     TOOL_DESCRIPTIONS,
+    agronomy_docs,
     forecast,
     mandi_prices,
     ndvi_timeseries,
@@ -37,8 +38,10 @@ from app.tools import (
 )
 
 MAX_DRAFTS = 3
-ToolName = Literal["weather_forecast", "climate_anomaly", "soil_profile", "crop_ndvi", "mandi_prices"]
+ToolName = Literal["weather_forecast", "climate_anomaly", "soil_profile", "crop_ndvi", "mandi_prices",
+                   "agronomy_docs"]
 TOOL_ORDER: list[str] = list(TOOL_DESCRIPTIONS)
+DOC_INTENTS = {"pest_disease", "fertilizer", "sowing", "harvest_timing"}
 
 
 class Understanding(BaseModel):
@@ -47,6 +50,8 @@ class Understanding(BaseModel):
     intent: Literal["harvest_timing", "sowing", "irrigation", "pest_disease", "fertilizer",
                     "selling", "weather", "general", "off_topic"]
     tools: list[ToolName]
+    doc_query: str | None = Field(
+        default=None, description="English search query for the agronomy guides, if agronomy_docs is used")
     plan: str
 
 
@@ -93,6 +98,11 @@ async def understand(state: AgentState) -> AgentState:
         result["tools"] = ["weather_forecast"]
     if "mandi_prices" in result["tools"] and not result.get("crop"):
         result["tools"].remove("mandi_prices")
+    # Treatment / practice questions must be grounded in official guides, never model memory.
+    if result["intent"] in DOC_INTENTS and "agronomy_docs" not in result["tools"]:
+        result["tools"].append("agronomy_docs")
+    if "agronomy_docs" in result["tools"] and not result.get("doc_query"):
+        result["doc_query"] = f"{result.get('crop') or ''} {result['intent'].replace('_', ' ')}".strip()
     _emit({"type": "plan", "node": "understand", "understanding": result})
     return {"understanding": result}
 
@@ -101,7 +111,7 @@ async def run_tools(state: AgentState) -> AgentState:
     lat, lon = state["lat"], state["lon"]
     u = state["understanding"]
     planned = [t for t in TOOL_ORDER if t in u["tools"]]
-    _emit({"type": "node", "node": "run_tools", "msg": f"Calling {len(planned) + 1} live data tools in parallel"})
+    _emit({"type": "node", "node": "run_tools", "msg": f"Calling {len(planned) + 1} tools in parallel"})
 
     async def call(name: str, coro) -> tuple[str, dict[str, Any]]:
         _emit({"type": "tool_start", "tool": name})
@@ -123,6 +133,7 @@ async def run_tools(state: AgentState) -> AgentState:
         "climate_anomaly": lambda: recent_anomaly(lat, lon),
         "soil_profile": lambda: soil_profile(lat, lon),
         "crop_ndvi": lambda: ndvi_timeseries(lat, lon, state.get("polygon")),
+        "agronomy_docs": lambda: agronomy_docs(u.get("doc_query") or state["question"]),
     }
     if "mandi_prices" in planned:
         if location["ok"]:
@@ -142,7 +153,12 @@ def _evidence_block(results: dict[str, dict[str, Any]]) -> str:
     parts = []
     for r in sorted(results.values(), key=lambda r: int(r["id"][1:])):
         head = f"[{r['id']}] {r['tool']} | source: {r['source']} | fetched: {r['fetched_at'][:16]}"
-        if r["ok"]:
+        if r["ok"] and r["tool"] == "agronomy_docs":
+            passages = "\n".join(
+                f"- ({p['publisher']} {p['year']}, \"{p['title']}\", p.{p['page']}): {p['text']}"
+                for p in r["data"]["passages"])
+            parts.append(f"{head}\nOFFICIAL GUIDE PASSAGES for query {r['data']['query']!r}:\n{passages}")
+        elif r["ok"]:
             stale = " | STALE CACHED COPY" if r["stale"] else ""
             parts.append(f"{head}{stale}\n{json.dumps(r['data'], ensure_ascii=False)}")
         else:
@@ -218,10 +234,14 @@ async def finalize(state: AgentState) -> AgentState:
         v = state["verification"]
         results = state["results"]
         by_id = {r["id"]: r for r in results.values()}
-        citations = [
-            {k: by_id[c][k] for k in ("id", "tool", "source", "url", "fetched_at", "stale")}
-            for c in v["citations_used"]
-        ]
+        citations = []
+        for c in v["citations_used"]:
+            r = by_id[c]
+            cite = {k: r[k] for k in ("id", "tool", "source", "url", "fetched_at", "stale")}
+            if r["tool"] == "agronomy_docs":  # point at the exact document pages used
+                cite["refs"] = [{k: p[k] for k in ("title", "publisher", "year", "page", "url")}
+                                for p in r["data"]["passages"]]
+            citations.append(cite)
         failed = [r["tool"] for r in results.values() if not r["ok"]]
         stale = [r["tool"] for r in results.values() if r["ok"] and r["stale"]]
         confidence = "high" if v["ok"] and not failed and not stale else "medium" if v["ok"] else "low"

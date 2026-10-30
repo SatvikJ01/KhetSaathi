@@ -1,24 +1,63 @@
 """FastAPI entrypoint: agent Q&A (streamed trace) and field dashboard data."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from sse_starlette.sse import EventSourceResponse
 
 from app.agent.graph import GRAPH
 from app.alerts import scan_field
 from app.config import get_settings
-from app.tools import forecast, ndvi_timeseries, recent_anomaly, reverse_geocode, soil_profile
+from app.tools import (
+    agronomy_docs,
+    forecast,
+    mandi_prices,
+    ndvi_timeseries,
+    recent_anomaly,
+    reverse_geocode,
+    soil_profile,
+)
 from app.voice import VoiceError, synthesize, transcribe
 
 MAX_AUDIO_BYTES = 5 * 1024 * 1024
+log = logging.getLogger("khetsaathi")
 
-app = FastAPI(title="KhetSaathi API", version="0.1.0")
+
+async def prewarm() -> None:
+    """Fill caches for the demo field and load the RAG index in the background."""
+    s = get_settings()
+    lat, lon = s.demo_lat, s.demo_lon
+    t0 = time.perf_counter()
+    loc = await reverse_geocode(lat, lon)
+    jobs = [forecast(lat, lon), recent_anomaly(lat, lon), soil_profile(lat, lon), ndvi_timeseries(lat, lon),
+            agronomy_docs("onion harvest curing storage")]
+    if loc.ok and s.data_gov_api_key:
+        jobs.append(mandi_prices(s.demo_crop, loc.data["state"], loc.data["district"]))
+    results = await asyncio.gather(*jobs, return_exceptions=True)
+    ok = sum(1 for r in results if not isinstance(r, BaseException) and r.ok)
+    log.warning("prewarm: %d/%d demo-field tools cached in %.0fs", ok, len(results), time.perf_counter() - t0)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    task = asyncio.create_task(prewarm()) if get_settings().prewarm else None
+    yield
+    if task:
+        task.cancel()
+
+
+app = FastAPI(title="KhetSaathi API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in get_settings().cors_origins.split(",")],
@@ -95,7 +134,7 @@ async def ask(body: AskIn) -> EventSourceResponse:
     """Run the agent; stream trace events, then the final answer, as Server-Sent Events."""
     if not _llm_configured():
         raise HTTPException(503, f"LLM not configured: set the API key for LLM_PROVIDER={get_settings().llm_provider}")
-    state ={"question": body.question.strip(), "lat": body.lat, "lon": body.lon,
+    state = {"question": body.question.strip(), "lat": body.lat, "lon": body.lon,
              "polygon": body.polygon, "crop_hint": body.crop}
 
     async def events():
@@ -135,3 +174,10 @@ async def voice_tts(body: TtsIn) -> dict[str, str]:
         return {"audio_base64": await synthesize(spoken, body.language), "format": "wav"}
     except VoiceError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+# In production the built React app is served from the same origin (one URL, no CORS).
+# Mounted last so it never shadows the API routes above.
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")

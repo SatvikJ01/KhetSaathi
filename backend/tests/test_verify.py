@@ -35,6 +35,38 @@ def test_devanagari_digits_are_checked():
     assert not verify_draft("९९ मिमी बारिश [T2]", RESULTS, "बारिश?")["ok"]
 
 
-def test_pesticide_dose_blocked():
+def test_pesticide_dose_blocked_without_guide():
     v = verify_draft("Spray 2 ml/litre [T2].", RESULTS, "pest?")
-    assert any("dosage" in i for i in v["issues"])
+    assert any("Dose" in i for i in v["issues"])
+
+
+DOCS = {
+    "id": "T4", "tool": "agronomy_docs", "ok": True,
+    "data": {"query": "thrips", "passages": [{
+        "title": "Scientific cultivation of kharif onion", "publisher": "ICAR, Indian Horticulture",
+        "year": "Mar-Apr 2021", "page": 3, "url": "x",
+        "text": "Spray with fipronil 5 SC @ 1 ml/l of water or carbosulfan 25% EC @ 2 ml/l of water.",
+    }]},
+}
+WITH_DOCS = {**RESULTS, "agronomy_docs": DOCS}
+
+
+def test_dose_allowed_when_copied_from_cited_guide():
+    draft = "Spray fipronil 5 SC @ 1 ml/l of water (ICAR 2021, p.3) [T4]."
+    v = verify_draft(draft, WITH_DOCS, "thrips?")
+    assert v["ok"], v["issues"]
+
+
+def test_dose_not_in_guide_blocked():
+    v = verify_draft("Spray fipronil 3 ml/l of water [T4].", WITH_DOCS, "thrips?")
+    assert any("Dose" in i for i in v["issues"])
+
+
+def test_stray_cyrillic_rejected():
+    v = verify_draft("कार्बोсульफन का छिड़काव करें [T4].", WITH_DOCS, "thrips?")
+    assert any("Cyrillic" in i for i in v["issues"])
+
+
+def test_banned_pesticide_blocked_even_if_cited():
+    v = verify_draft("Use monocrotophos for thrips [T4].", WITH_DOCS, "thrips?")
+    assert any("Banned" in i for i in v["issues"])

@@ -1,0 +1,22 @@
+# Render Blueprint: Dashboard -> New -> Blueprint -> pick this repo.
+# Secrets marked sync:false are asked for once in the dashboard and never stored in git.
+services:
+  - type: web
+    name: khetsaathi
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: DATA_GOV_API_KEY
+        sync: false
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

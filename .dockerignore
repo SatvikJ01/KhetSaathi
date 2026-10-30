@@ -1,0 +1,10 @@
+**/.env
+**/.venv
+**/__pycache__
+**/.pytest_cache
+backend/.cache
+frontend/node_modules
+frontend/dist
+.git
+.claude
+FORGE26_PLAN.md

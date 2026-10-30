@@ -20,6 +20,13 @@ DOSE_RE = re.compile(
     re.IGNORECASE,
 )
 SMALL_INT_MAX = 10  # counts like "2 days", "3 steps" need no evidence
+# Banned in India, or not permitted on vegetables (CIB&RC). Older guides still mention some of these,
+# so the answer is rejected even when a cited source contains the name.
+BANNED_PESTICIDES = [
+    "monocrotophos", "endosulfan", "methyl parathion", "phorate", "carbofuran", "triazophos",
+    "dichlorvos", "phosphamidon", "मोनोक्रोटोफॉस", "एंडोसल्फान", "मोनोक्रोटोफोस",
+]
+DOCS_TOOL = "agronomy_docs"
 
 
 def normalize_digits(text: str) -> str:
@@ -42,10 +49,23 @@ def _numeric_leaves(obj: Any) -> Iterable[float]:
             yield from _numeric_leaves(v)
 
 
+def _numbers_in(text: str) -> list[float]:
+    return [float(m.replace(",", "")) for m in NUMBER_RE.findall(normalize_digits(text))]
+
+
+def doc_numbers(results: dict[str, dict[str, Any]]) -> list[float]:
+    """Every number written in the retrieved guide passages (doses, years, pages)."""
+    docs = results.get(DOCS_TOOL)
+    if not docs or not docs["ok"]:
+        return []
+    return [n for p in docs["data"]["passages"]
+            for field in ("text", "year", "title") for n in _numbers_in(str(p[field]))] + \
+           [float(p["page"]) for p in docs["data"]["passages"]]
+
+
 def evidence_numbers(results: dict[str, dict[str, Any]], question: str) -> list[float]:
     nums = [n for r in results.values() if r["ok"] for n in _numeric_leaves(r["data"])]
-    nums += [float(m.replace(",", "")) for m in NUMBER_RE.findall(normalize_digits(question))]
-    return nums
+    return nums + doc_numbers(results) + _numbers_in(question)
 
 
 def _grounded(value: float, evidence: list[float]) -> bool:
@@ -80,8 +100,24 @@ def verify_draft(draft: str, results: dict[str, dict[str, Any]], question: str) 
             "Remove them or replace with the exact evidence values."
         )
 
-    if DOSE_RE.search(text):
-        issues.append("Chemical dosage given without an official source. Refer the farmer to the KVK instead.")
+    docs = results.get(DOCS_TOOL)
+    docs_cited = bool(docs and docs["ok"] and docs["id"] in cited)
+    # Doses must match numbers in the passage *text*, not page numbers or years.
+    doc_nums = {n for p in docs["data"]["passages"] for n in _numbers_in(p["text"])} if docs_cited else set()
+    for m in DOSE_RE.finditer(text):
+        dose = float(re.match(r"\d+(?:\.\d+)?", m.group(0)).group(0))
+        if not docs_cited or dose not in doc_nums:
+            issues.append(f"Dose '{m.group(0)}' is not copied from a cited official guide passage. "
+                          "Remove it and refer the farmer to the KVK.")
+
+    # LLMs occasionally leak Cyrillic/Greek letters into transliterated chemical names
+    if re.search(r"[Ͱ-ϿЀ-ӿ]", text):
+        issues.append("Answer contains stray Cyrillic/Greek characters; rewrite those words in the answer's script.")
+
+    lowered = text.lower()
+    banned = [b for b in BANNED_PESTICIDES if b in lowered]
+    if banned:
+        issues.append(f"Banned/restricted pesticide mentioned: {banned}. Never recommend it; remove it.")
 
     return {
         "ok": not issues,

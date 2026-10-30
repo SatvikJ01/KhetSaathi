@@ -6,6 +6,7 @@ const SAMPLES = [
   "इस हफ्ते प्याज की खुदाई करूँ या रुकूँ? और कहाँ बेचूँ?",
   "माझ्या शेताला या आठवड्यात पाणी द्यावे का?",
   "Is my crop healthy? Should I worry about rain this week?",
+  "प्याज में थ्रिप्स कीट लगे हैं, क्या करूँ?",
   "What is the capital of France?", // off-topic guardrail demo
 ];
 
@@ -16,6 +17,7 @@ const TOOL_LABELS = {
   soil_profile: "🟫 Soil profile",
   crop_ndvi: "🛰️ Satellite NDVI",
   mandi_prices: "💰 Mandi prices",
+  agronomy_docs: "📚 Official guides (ICAR, MPKV)",
 };
 
 function TraceItem({ e }) {
@@ -208,6 +210,15 @@ export default function Chat({ field }) {
                   <b>{c.id}</b> <a href={c.url} target="_blank" rel="noreferrer">{c.source}</a>
                   {" · "}{new Date(c.fetched_at).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })}
                   {c.stale && " · cached"}
+                  {c.refs && (
+                    <ul className="refs">
+                      {c.refs.map((r, k) => (
+                        <li key={k}>
+                          <a href={r.url} target="_blank" rel="noreferrer">{r.title}</a>, {r.publisher} ({r.year}), p.{r.page}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </li>
               ))}
             </ol>
